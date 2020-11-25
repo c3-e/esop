@@ -96,7 +96,7 @@ public class TransferManagerFactory {
         return builder.build();
     }
 
-    private S3Configuration resolveS3ConfigurationFromEnvProperties() {
+    public S3Configuration resolveS3ConfigurationFromEnvProperties() {
         final S3Configuration s3Configuration = new S3Configuration();
 
         s3Configuration.awsRegion = System.getenv("AWS_REGION");
