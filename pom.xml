@@ -5,7 +5,7 @@
     
     <groupId>com.instaclustr</groupId>
     <artifactId>esop</artifactId>
-    <version>1.0.5-SNAPSHOT</version>
+    <version>1.0.6</version>
     
     <name>instaclustr-esop</name>
     <description>Backup and restoration tooling for Cassandra</description>
@@ -15,7 +15,7 @@
         <instaclustr.commons.version>1.4.2</instaclustr.commons.version>
         <azure-storage.version>8.6.4</azure-storage.version>
         <google-cloud-libraries.version>3.4.0</google-cloud-libraries.version>
-        <aws-java-sdk.version>1.11.782</aws-java-sdk.version>
+        <aws-java-sdk.version>1.11.906</aws-java-sdk.version>
         <slf4j.version>1.7.30</slf4j.version>
         
         <cassandra.driver.version>4.6.0</cassandra.driver.version>
@@ -131,6 +131,11 @@
         <dependency>
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-s3</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-java-sdk-sts</artifactId>
         </dependency>
         
         <dependency>

@@ -10,6 +10,8 @@ import com.amazonaws.ClientConfiguration;
 import com.amazonaws.Protocol;
 import com.amazonaws.auth.AWSCredentials;
 import com.amazonaws.auth.AWSCredentialsProvider;
+import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
+import com.amazonaws.auth.WebIdentityTokenCredentialsProvider;
 import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
@@ -105,33 +107,8 @@ public class TransferManagerFactory {
             builder.withClientConfiguration(clientConfiguration);
         }
 
-        // if we are not running against Kubernetes, credentials should be fetched from ~/.aws/...
-        if (isRunningInKubernetes()) {
-            // it is possible that we have not set any secrets for s3 so the last
-            // resort is to fallback to AWS instance credentials.
-            if (s3Conf.awsAccessKeyId != null && s3Conf.awsSecretKey != null) {
-                builder.setCredentials(new AWSCredentialsProvider() {
-                    @Override
-                    public AWSCredentials getCredentials() {
-                        return new AWSCredentials() {
-                            @Override
-                            public String getAWSAccessKeyId() {
-                                return s3Conf.awsAccessKeyId;
-                            }
-
-                            @Override
-                            public String getAWSSecretKey() {
-                                return s3Conf.awsSecretKey;
-                            }
-                        };
-                    }
-
-                    @Override
-                    public void refresh() {
-                    }
-                });
-            }
-        }
+        logger.info("Use DefaultAWSCredentialsProviderChain");
+        builder.setCredentials(new DefaultAWSCredentialsProviderChain());
 
         return builder.build();
     }

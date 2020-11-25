@@ -89,7 +89,7 @@ public abstract class AbstractOperationRequest extends OperationRequest {
 
         logger.info("Resolved secret name {}", resolvedSecretName);
 
-        return resolvedSecretName;
+        return k8sSecretName;
     }
 
     @JsonIgnore
