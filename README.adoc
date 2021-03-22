@@ -13,7 +13,7 @@ image::Esop.png[Esop,width=50%]
 
 This repository is home of backup and restoration tools from Instaclustr for Cassandra called https://en.wikipedia.org/wiki/Aesop[Esop]
 
-Esop is able to perform these operations:
+Esop is able to perform these operations and has these features:
 
 * Backup and restore of SSTables
 * Backup and restore of commit logs
@@ -31,6 +31,9 @@ downtime is necessary
 * It takes care of details such as initial tokens, auto bootstrapping, and so on...
 * Ability to throttle the bandwidth used for backup
 * Point-in-time restoration of commit logs
+* verification of downloaded data - computes hases upon upload and download and it has to match otherwise restoration fails
+* it is possible to restore tables under different names so they do not clash with your current tables ideal when you want to investigate / check data before you restore the original tables, to see what data you will have once you restore it
+* retry of failed operations against s3 when uploading / downloading failure happens
 
 This tool is used as a command line utility and it is meant to be executed from a shell
 or from scripts. However, this tooling is also embedded seamlessly into Instaclustr Icarus.
@@ -101,7 +104,7 @@ _from scratch_ or if you use <<In-place restoration strategy>>.
 Data to backup and restore from, are located in a remote storage. This setting is controlled by flag
 `--storage-location`. The storage location flag has very specific structure which also indicates where data will be
 uploaded. Locations consist of a storage _protocol_ and path. Please keep in mind that the protocol we are using is not a
-_real_ protocol. It is merely a mnemonic. Use either `s3`, `gcp`, `azure`, `oracle`, `ceph` or `file`.
+_real_ protocol. It is merely a mnemonic. Use either `s3`, `gcp`, `azure`, `oracle`, `minio`, `ceph` or `file`.
 
 The format is:
 
@@ -181,6 +184,10 @@ secret is specified. You need to provide typical access key and secret key too.
 Please consult the following section to know more about Kubernetes-related
 authentication properties resolution. Setting protocol to HTTP might be achieved similarly as for normal
 S3 module, by specifying `--insecure-http` flag.
+
+#### Minio
+
+`minio` is alias of `oracle`. Oracle nor Minio uses path-style requests which S3 module does not.
 
 #### Authentication in Kubernetes
 
@@ -570,11 +577,12 @@ This strategy works for Cassandra version 3 as well as for Cassandra 4.
 
 #### Importing Strategy
 
-This strategy is similar to hardlinking strategy—the node upon restoration can still run and serve
+This strategy is similar to hardlinking strategy — the node upon restoration can still run and serve
 other requests so a restoration process is not disruptive. _Importing_ means that it will
 import downloaded SSTables via JMX directly so no hardlinks and refresh are necessary. Importing of
 SSTables by calling respecting JMX method was introduced in Cassandra 4 only, so this does not work
-against a node of version 3 or below.
+against a node of version 3 or below. Keep in mind that imported SSTables are physically deleted
+from download directory and moved to live Cassandra data directory.
 
 #### Restoration Phases for Hardlinking and Importing Strategy
 
@@ -597,16 +605,6 @@ In a situation where we are restoring into a cluster of multiple nodes, the trun
 operation should be executed only once against a particular node, as Cassandra will internally
 distribute the truncating operation to all nodes in a cluster. In other words, it is enough to
 truncate at one node only as data from all other nodes will be truncated too.
-
-For importing strategy, the disk space required for a restore is bigger than for hard-linking strategy.
-Let's imagine we have a node with one table which occupies 2GB of disk space. If we want to
-restore from a snapshot having 1GB, after download we occupy 3GB. Then we truncate, but truncating
-is not deleting the old files, it will just move them to `truncated-` directory, so we still occupy 3GB.
-If we create a hard link, it does not occupy any space. But importing will effectively copy data over
-so we occupy 4GB instead of hard-linking's 3GB. Then the cleaning phase kicks in and both are truncated and
-download directories are deleted, so we will end up with 1GB occupied in both cases.
-
-For the reasons mentioned above, it is important to measure/plan the restore capacity-wise as well.
 
 Downloading phase is proceeding all other phases because we want to be sure that we are truncating the data if
 and only if we have all data to restore from. If we truncated all data and download fails, we
@@ -732,7 +730,7 @@ will be automatically expanded by Cassandra). Then you might archive your commit
 
 ----
 $ commitlog-backup \
-  --storage-location=s3://myBucket/mycluster/dc1/node1, \
+  --storage-location=s3://myBucket/mycluster/dc1/node1 \
   --cl-archive=/backup
 ----
 
@@ -811,7 +809,7 @@ You can backup commit logs as well. An example of a commit log backup is like th
 
 ----
 $ commitlog-backup \
-  --storage-location=s3://myBucket/mycluster/dc1/node1, \
+  --storage-location=s3://myBucket/mycluster/dc1/node1 \
   --data-directory=/my/installation/of/cassandra
 ----
 
@@ -919,6 +917,83 @@ If you check this closely you see that the only flag we have changed is `--resto
 and that is correct. All commands will look exactly the same but they will just differ on `--restoration-phase-type`.
 
 If we wanted to do a restore via Cassandra JMX _importing_, our `--restoration-strategy-type` would be `import`.
+
+### Renaming of a table to restore to
+
+It is possible to restore to a different table you backed up. This feature is very handy for cases
+when you want to examine data before you actually restore them - you might put them temporarily
+to a different table to see if all is right etc. From Esop CLI, you drive this feature by flag called `--rename`.
+This flag might repeat as many times as many times you need to rename.
+
+This feature might be used only for hardlinks or importing strategy, not for in-place.
+
+A table has to exist before a restore action is taken. Esop does **not** create this table for you automatically
+and it is left for a user to ensure such table exists before proceeding.
+
+Let's say you have backed up a table called `tb1` in a keyspace called `ks1` but you want to restore
+it into table `tb2` in the same keyspace. Hence you need to specify `--rename=ks1.tb1=ks1.tb2`.
+
+`--rename` options is meant to be used along with `--entities`. It is a valid scenario to do this:
+
+These examples show invalid cases for the combination of `--entities` and `--renamed`
+
+----
+--entities="" --rename=whatever non empty  -> invalid
+--entities=ks1 --rename=whatever non empty -> invalid, you can not use only a keyspace in --entities
+--entities=ks1.tb1 --rename=ks1.tb2=ks1.tb2 -> invalid as "from" is not in entities
+--entities=ks1.tb1 --rename=ks1.tb2=ks1.tb1 -> invalid as "to" is in entities (and from is not in entities)
+--entities=ks1.tb1 --rename=ks1.tb1=ks1.tb2 -> truncate ks1.tb2 and process just ks1.tb2, k1.tb1 is not touched
+----
+
+Valid cases:
+
+----
+--entities=ks1.tb1 --rename=ks1.tb1=ks1.tb2
+--entities=ks1.tb1 --rename=ks1.tb1=ks2.tb1
+--entities=ks1.tb1,ks2.tb2,ks3.tb4 --rename=ks1.tb1=ks1.tb2,ks2.tb2=ks3.tb3
+----
+
+* entities in "to" have to be unique across all renaming pairs, "ks1.tb1=ks1.tb2,ks1.tb3=ks1.tb2" is invalid
+* please keep in mind that if you are doing cross-keyspace renaming, as of now you are completely on your
+own when it comes to e.g. replication factors etc, Esop currently does not check that replication factor
+and replication strategy in source and target keyspace match. This might be addressed in the future versions.
+
+From Icarus point of view, you need to add a map under "rename" field:
+
+----
+{
+    "rename": {
+        "ks1.tb1": "ks1.tb2",
+        "ks2.tb3": "ks2.tb4",
+        "ks3.tb5": "ks3.tb6"
+    }
+}
+----
+
+### Retry of upload / download operations
+
+Imagine there is a restore happening which is downloading 100 GB of data and your connectivity
+to the Internet is disrupted when it is almost done, on 80%. If you restart whole restoration
+process, you do not want to download all 80 GB again. Hence, we want that if a restore is stopped
+in the middle, it will not start from scratch next time we run it and it will download what is necessary.
+
+As a result of these errors, a file might be corrupted, it may be incomplete on the disk
+so its loading or hard linking into Cassandra would fail. To be sure that data are not corrupted,
+there is a hash (sha512) of that file made and it is uploaded as part of the manifest. Upon restore,
+if that file already exists locally, it computes the has and it compares it withe the one in the manifest
+and they have to match. If they do not match, such corrupted file is deleted and whole operation
+as such (download phase in case of import or hardlinks strategy) fails. On the next restore attempt,
+it will skip files which are in download directory already present and donwloads ony missing ones,
+computing their hashes etc ...
+
+On backup path, if a communication error happens, this is also detected and operation fails
+as such but some files might be already uploaded. On next upload, Esop checks if such file
+is already present remotely and it will skip it from uploading if it does.
+
+If upload of a file fails, Esop can _retry_. The mechanism how this happens is controlled by
+the family of "--retry-*" switches on the command line. In a nutshell, your retry might be
+exponential or linear. The exponential retry will execute the same operation (e.g. uploading of a file)
+every time exponentially it terms of the pause between retries. Linear retry has the retry period constant.
 
 ### Explanation of Global Requests
 

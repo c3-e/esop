@@ -1,9 +1,18 @@
 package com.instaclustr.esop.impl.restore;
 
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotBlank;
+import static com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType.HARDLINKS;
+import static com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType.IMPORT;
+import static com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType.IN_PLACE;
+import static com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType.UNKNOWN;
+import static java.lang.String.format;
+
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -20,18 +29,20 @@ import com.instaclustr.esop.impl.DatabaseEntities.DatabaseEntitiesDeserializer;
 import com.instaclustr.esop.impl.DatabaseEntities.DatabaseEntitiesSerializer;
 import com.instaclustr.esop.impl.Directories;
 import com.instaclustr.esop.impl.ProxySettings;
+import com.instaclustr.esop.impl.RenamedEntities;
 import com.instaclustr.esop.impl.StorageLocation;
 import com.instaclustr.esop.impl._import.ImportOperationRequest;
 import com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType;
 import com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseTypeConverter;
 import com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType;
 import com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyTypeConverter;
+import com.instaclustr.esop.impl.retry.RetrySpec;
 import com.instaclustr.jackson.PathDeserializer;
 import com.instaclustr.jackson.PathSerializer;
+import com.instaclustr.kubernetes.KubernetesHelper;
 import com.instaclustr.picocli.typeconverter.PathTypeConverter;
 import picocli.CommandLine.Option;
 
-@ValidRestoreOperationRequest
 public class RestoreOperationRequest extends BaseRestoreOperationRequest {
 
     @JsonIgnore
@@ -60,7 +71,6 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
     @Option(names = {"-s", "--st", "--snapshot-tag"},
         description = "Snapshot to download and restore.",
         required = true)
-    @NotBlank
     public String snapshotTag;
 
     @Option(names = {"--entities"},
@@ -77,8 +87,9 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
 
     @Option(names = {"--restoration-strategy-type"},
         description = "Strategy type to use, either IN_PLACE, IMPORT or HARDLINKS",
-        converter = RestorationStrategyTypeConverter.class)
-    public RestorationStrategyType restorationStrategyType = RestorationStrategyType.IN_PLACE;
+        converter = RestorationStrategyTypeConverter.class,
+        required = true)
+    public RestorationStrategyType restorationStrategyType;
 
     @Option(names = {"--restoration-phase-type"},
         description = "Restoration phase a particular restoration strategy is in during this request invocation, a must to specify upon IMPORT or HARDLINKS strategy",
@@ -137,6 +148,17 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
             + "--restoration-strategy-type is IN_PLACE")
     public String cassandraVersion;
 
+    @JsonProperty
+    @Option(names = "--rename",
+        description = "[OLD_KEYSPACE.OLD_TABLE]=[OLD_KEYSPACE.NEW_TABLE], if specified upon restoration, table will be restored into new table, not into the original one")
+    public Map<String, String> rename = new HashMap<>();
+
+    // this option does not make sense for Esop CLI as any request would be confined to one node only and one phase only
+    // if specified in connection with Icarus, it will execute just one phase, cluster wide, and it will not advance to other phases
+    // which are required in restoration, by doing this, one migh e.g.call cluster-wide download phase or cleanup phase in isolation
+    @JsonProperty("singlePhase")
+    public boolean singlePhase;
+
     public RestoreOperationRequest() {
         // for picocli
     }
@@ -167,13 +189,16 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
                                    @JsonProperty("k8sNamespace") final String k8sNamespace,
                                    @JsonProperty("k8sSecretName") final String k8sSecretName,
                                    @JsonProperty("globalRequest") final boolean globalRequest,
-                                   @JsonProperty("timeout") @Min(1) final Integer timeout,
+                                   @JsonProperty("timeout") final Integer timeout,
                                    @JsonProperty("resolveHostIdFromTopology") final boolean resolveHostIdFromTopology,
                                    @JsonProperty("insecure") final boolean insecure,
                                    @JsonProperty("newCluster") final boolean newCluster,
                                    @JsonProperty("skipBucketVerification") final boolean skipBucketVerification,
-                                   @JsonProperty("proxySettings") final ProxySettings proxySettings) {
-        super(storageLocation, concurrentConnections, lockFile, k8sNamespace, k8sSecretName, insecure, skipBucketVerification, proxySettings);
+                                   @JsonProperty("proxySettings") final ProxySettings proxySettings,
+                                   @JsonProperty("rename") final Map<String, String> rename,
+                                   @JsonProperty("retry") final RetrySpec retry,
+                                   @JsonProperty("singlePhase") final boolean singlePhase) {
+        super(storageLocation, concurrentConnections, lockFile, k8sNamespace, k8sSecretName, insecure, skipBucketVerification, proxySettings, retry);
         this.cassandraDirectory = (cassandraDirectory == null || cassandraDirectory.toFile().getAbsolutePath().equals("/")) ? Paths.get("/var/lib/cassandra") : cassandraDirectory;
         this.cassandraConfigDirectory = cassandraConfigDirectory == null ? Paths.get("/etc/cassandra") : cassandraConfigDirectory;
         this.restoreSystemKeyspace = restoreSystemKeyspace;
@@ -190,9 +215,11 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
         this.exactSchemaVersion = exactSchemaVersion;
         this.globalRequest = globalRequest;
         this.type = type;
-        this.timeout = timeout == null ? 5 : timeout;
+        this.timeout = timeout == null || timeout < 1 ? 5 : timeout;
         this.resolveHostIdFromTopology = resolveHostIdFromTopology;
         this.newCluster = newCluster;
+        this.rename = rename == null ? Collections.emptyMap() : rename;
+        this.singlePhase = singlePhase;
     }
 
     @Override
@@ -223,6 +250,100 @@ public class RestoreOperationRequest extends BaseRestoreOperationRequest {
             .add("skipBucketVerification", skipBucketVerification)
             .add("proxySettings", proxySettings)
             .add("cassandraVersion", cassandraVersion)
+            .add("rename", rename)
+            .add("retry", retry)
+            .add("singlePhase", singlePhase)
             .toString();
+    }
+
+    @JsonIgnore
+    public void validate(Set<String> storageProviders) {
+        super.validate(storageProviders);
+
+        if (this.snapshotTag == null || this.snapshotTag.isEmpty()) {
+            throw new IllegalStateException("snapshotTag can not be blank!");
+        }
+
+        if (this.restorationPhase == null) {
+            this.restorationPhase = RestorationPhaseType.UNKNOWN;
+        }
+
+        if (this.restorationStrategyType == UNKNOWN) {
+            throw new IllegalStateException("restorationStrategyType is not recognized");
+        }
+
+        if (this.restorationStrategyType != IN_PLACE) {
+            if (this.restorationPhase == RestorationPhaseType.UNKNOWN) {
+                throw new IllegalStateException("restorationPhase is not recognized, it has to be set when you use IMPORT or HARDLINKS strategy type");
+            }
+        }
+
+        if (this.restorationStrategyType == IN_PLACE && this.restorationPhase != RestorationPhaseType.UNKNOWN) {
+            throw new IllegalStateException(format("you can not set restorationPhase %s when your restorationStrategyType is IN_PLACE", this.restorationPhase));
+        }
+
+        if (this.restorationStrategyType == IMPORT || this.restorationStrategyType == HARDLINKS) {
+            if (this.importing == null) {
+                throw new IllegalStateException(format("you can not specify %s restorationStrategyType and have 'import' field empty!", this.restorationStrategyType));
+            }
+        }
+
+        if (!Files.exists(this.cassandraDirectory)) {
+            throw new IllegalStateException(format("cassandraDirectory %s does not exist", this.cassandraDirectory));
+        }
+
+        if ((KubernetesHelper.isRunningInKubernetes() || KubernetesHelper.isRunningAsClient())) {
+            if (this.resolveKubernetesSecretName() == null) {
+                throw new IllegalStateException("This code is running in Kubernetes or as a Kubernetes client but it is not possible to resolve k8s secret name for restores!");
+            }
+
+            if (this.resolveKubernetesNamespace() == null) {
+                throw new IllegalStateException("This code is running in Kubernetes or as a Kubernetes client but it is not possible to resolve k8s namespace for restores!");
+            }
+        }
+
+        if (this.entities == null) {
+            this.entities = DatabaseEntities.empty();
+        }
+
+        try {
+            DatabaseEntities.validateForRequest(this.entities);
+        } catch (final Exception ex) {
+            throw new IllegalStateException(ex.getMessage());
+        }
+
+        try {
+            RenamedEntities.validate(this.rename);
+        } catch (final Exception ex) {
+            throw new IllegalStateException("Invalid 'rename' parameter: " + ex.getMessage());
+        }
+
+        if (this.rename != null && !this.rename.isEmpty() && this.restorationStrategyType == IN_PLACE) {
+            throw new IllegalStateException("rename field can not be used for in-place strategy, only for import or hardlinks");
+        }
+
+        if (importing != null && importing.sourceDir != null && cassandraDirectory != null) {
+            if (importing.sourceDir.equals(cassandraDirectory.resolve("data"))) {
+                throw new IllegalStateException(String.format("Directory where SSTables will be downloaded (%s) is equal to Cassandra data "
+                                                                  + "directory where your keyspaces are - this is not valid. Please set "
+                                                                  + "sourceDir to a destination which is not equal to nor in %s",
+                                                              importing.sourceDir,
+                                                              cassandraDirectory.resolve("data")));
+            }
+
+            if (importing.sourceDir.startsWith(cassandraDirectory.resolve("data"))) {
+                throw new IllegalStateException(String.format("Directory where SSTables will be downloaded (%s) is inside Cassandra data "
+                                                                  + "directory where your keyspaces are - this is not valid. Please set "
+                                                                  + "sourceDir to a destination which does not start with %s",
+                                                              importing.sourceDir,
+                                                              cassandraDirectory.resolve("data")));
+            }
+
+            if (importing.sourceDir.equals(cassandraDirectory)) {
+                throw new IllegalStateException(String.format("Directory where SSTables will be downloaded (%s) is equal to Cassandra directory %s",
+                                                              importing.sourceDir,
+                                                              cassandraDirectory));
+            }
+        }
     }
 }

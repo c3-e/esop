@@ -4,8 +4,6 @@ import static com.google.common.base.Strings.isNullOrEmpty;
 import static java.lang.String.format;
 import static java.nio.file.Files.exists;
 
-import javax.validation.constraints.NotNull;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -25,7 +23,6 @@ import com.instaclustr.operations.FunctionWithEx;
 import com.instaclustr.operations.Operation;
 import com.instaclustr.operations.OperationFailureException;
 import jmx.org.apache.cassandra.service.CassandraJMXService;
-import jmx.org.apache.cassandra.service.cassandra3.StorageServiceMBean;
 import jmx.org.apache.cassandra.service.cassandra4.Cassandra4ColumnFamilyStoreMBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,13 +56,13 @@ public class ImportOperation extends Operation<ImportOperationRequest> {
                             @JsonProperty("startTime") final Instant startTime,
                             @JsonProperty("keyspace") final String keyspace,
                             @JsonProperty("table") final String table,
+                            @JsonProperty("tablePath") final Path tablePath,
                             @JsonProperty("keepLevel") final boolean keepLevel,
                             @JsonProperty("noVerify") final boolean noVerify,
                             @JsonProperty("noVerifyTokens") final boolean noVerifyTokens,
                             @JsonProperty("noInvalidateCaches") final boolean noInvalidateCaches,
                             @JsonProperty("quick") final boolean quick,
                             @JsonProperty("extendedVerify") final boolean extendedVerify,
-                            @NotNull
                             @JsonProperty("sourceDir")
                             @JsonDeserialize(using = NioPathDeserializer.class)
                             @JsonSerialize(using = NioPathSerializer.class) final Path sourceDir) {
@@ -79,6 +76,7 @@ public class ImportOperation extends Operation<ImportOperationRequest> {
               new ImportOperationRequest(type,
                                          keyspace,
                                          table,
+                                         tablePath,
                                          keepLevel,
                                          noVerify,
                                          noVerifyTokens,
@@ -96,6 +94,11 @@ public class ImportOperation extends Operation<ImportOperationRequest> {
         assert cassandraJMXService != null;
         assert cassandraVersion != null;
 
+        if (!CassandraVersion.isFour(cassandraVersion)) {
+            throw new OperationFailureException(format("Underlying version of Cassandra is not supported to import SSTables: %s. Use this method "
+                                                           + "only if you run Cassandra 4 and above", cassandraVersion.toString()));
+        }
+
         if (isNullOrEmpty(request.keyspace)) {
             throw new IllegalStateException("keyspace was not specified!");
         }
@@ -104,60 +107,36 @@ public class ImportOperation extends Operation<ImportOperationRequest> {
             throw new IllegalStateException("table was not specified!");
         }
 
-        if (request.sourceDir == null) {
-            throw new IllegalStateException("Request's source dir is not specified");
+        if (request.sourceDir == null || !exists(request.sourceDir)) {
+            throw new IllegalStateException("Request's source dir is not specified or it does not exist!");
         }
 
-        if (!exists(request.sourceDir)) {
-            throw new IllegalStateException(String.format("source directory %s does not exist", request.sourceDir));
+        if (request.tablePath == null || !exists(request.tablePath)) {
+            throw new IllegalStateException(String.format("table path is not specified or it does not exist!: %s", request.tablePath));
         }
 
-        if (CassandraVersion.isFour(cassandraVersion)) {
-            final List<String> failedImportDirs = cassandraJMXService.doWithCassandra4ColumnFamilyStoreMBean(new FunctionWithEx<Cassandra4ColumnFamilyStoreMBean, List<String>>() {
-                @Override
-                public List<String> apply(final Cassandra4ColumnFamilyStoreMBean cfProxy) throws Exception {
+        final List<String> failedImportDirs = cassandraJMXService.doWithCassandra4ColumnFamilyStoreMBean(new FunctionWithEx<Cassandra4ColumnFamilyStoreMBean, List<String>>() {
+            @Override
+            public List<String> apply(final Cassandra4ColumnFamilyStoreMBean cfProxy) {
 
-                    logger.info(format("Importing SSTables of %s.%s", request.keyspace, request.table));
+                logger.info(format("Importing SSTables of %s.%s from %s", request.keyspace, request.table, request.tablePath.toAbsolutePath().toString()));
 
-                    final Path tablePath = Files.list(request.sourceDir.resolve("data").resolve(request.keyspace))
-                        .filter(table -> !table.getFileName().toString().endsWith(request.table) && table.getFileName().toString().startsWith(request.table))
-                        .findFirst()
-                        .orElseThrow(() -> new IllegalStateException(format("There is not any directory with SSTables belonging to %s keyspace and %s table",
-                                                                            request.keyspace, request.table)));
+                final List<String> failedImportDirectories = cfProxy.importNewSSTables(Sets.newHashSet(request.tablePath.toAbsolutePath().toString()),
+                                                                                       !request.keepLevel,
+                                                                                       !request.keepRepaired,
+                                                                                       !request.noVerify,
+                                                                                       !request.noVerifyTokens,
+                                                                                       !request.noInvalidateCaches,
+                                                                                       request.extendedVerify);
 
-                    final List<String> failedImportDirectories = cfProxy.importNewSSTables(Sets.newHashSet(tablePath.toAbsolutePath().toString()),
-                                                                                           !request.keepLevel,
-                                                                                           !request.keepRepaired,
-                                                                                           !request.noVerify,
-                                                                                           !request.noVerifyTokens,
-                                                                                           !request.noInvalidateCaches,
-                                                                                           request.extendedVerify);
+                logger.info(format("Importing SSTables of %s.%s has finished.", request.keyspace, request.table));
 
-                    logger.info(format("Importing SSTables of %s.%s has finished.", request.keyspace, request.table));
-
-                    return failedImportDirectories;
-                }
-            }, request.keyspace, request.table);
-
-            if (failedImportDirs != null && !failedImportDirs.isEmpty()) {
-                throw new OperationFailureException(format("Failed to import SSTable directories %s.", failedImportDirs.toString()));
+                return failedImportDirectories;
             }
-        } else if (CassandraVersion.isThree(cassandraVersion)) {
-            cassandraJMXService.doWithStorageServiceMBean(new FunctionWithEx<StorageServiceMBean, Object>() {
-                @Override
-                public Object apply(final StorageServiceMBean storageServiceMBean) {
+        }, request.keyspace, request.table);
 
-                    logger.info(format("Loading SSTables of %s.%s", request.keyspace, request.table));
-
-                    storageServiceMBean.loadNewSSTables(request.keyspace, request.table);
-
-                    logger.info(format("Loading SSTables of %s.%s has finished.", request.keyspace, request.table));
-
-                    return null;
-                }
-            });
-        } else {
-            throw new OperationFailureException(format("Underlying version of Cassandra is not supported to import (v4) nor load (v3) SSTables: %s", cassandraVersion.toString()));
+        if (failedImportDirs != null && !failedImportDirs.isEmpty()) {
+            throw new OperationFailureException(format("Failed to import SSTable directories %s.", failedImportDirs.toString()));
         }
     }
 }

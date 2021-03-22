@@ -54,6 +54,8 @@ import com.instaclustr.cassandra.CassandraModule;
 import com.instaclustr.esop.cli.Esop;
 import com.instaclustr.esop.impl.backup.BackupModules.BackupModule;
 import com.instaclustr.esop.impl.backup.BackupModules.UploadingModule;
+import com.instaclustr.esop.impl.hash.HashModule;
+import com.instaclustr.esop.impl.hash.HashSpec;
 import com.instaclustr.esop.impl.interaction.CassandraSchemaVersion;
 import com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType;
 import com.instaclustr.esop.impl.restore.RestoreModules.DownloadingModule;
@@ -77,6 +79,7 @@ public abstract class AbstractBackupTest {
         add(new UploadingModule());
         add(new DownloadingModule());
         add(new RestorationStrategyModule());
+        add(new HashModule(new HashSpec()));
 
         try {
             add(new CassandraModule());
@@ -90,7 +93,7 @@ public abstract class AbstractBackupTest {
 
     public static final String CASSANDRA_VERSION = System.getProperty("backup.tests.cassandra.version", "3.11.9");
 
-    public static final String CASSANDRA_4_VERSION = System.getProperty("backup.tests.cassandra4.version", "4.0-beta3");
+    public static final String CASSANDRA_4_VERSION = System.getProperty("backup.tests.cassandra4.version", "4.0-beta4");
 
     // This is number of rows we inserted into Cassandra DB in total
     // we backed up first 6 rows. For the last two rows, they are stored in commit logs.
@@ -180,6 +183,7 @@ public abstract class AbstractBackupTest {
             "--snapshot-tag=" + snapshotName,
             "--storage-location=" + getStorageLocation(),
             "--update-cassandra-yaml=true",
+            "--restore-system-keyspace",
             "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2",
             // this will import systema_schema, normally, it wont happen without setting --restore-system-keyspace
             // that would import all of them which is not always what we really want as other system tables
@@ -187,7 +191,8 @@ public abstract class AbstractBackupTest {
             "--restore-into-new-cluster",
             "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
             // restoring specifically for Cassandra 2 (maybe)
-            "--cassandra-version=" + cassandraVersion
+            "--cassandra-version=" + cassandraVersion,
+            "--restoration-strategy-type=IN_PLACE"
         };
 
         // COMMIT LOG RESTORE
@@ -251,7 +256,8 @@ public abstract class AbstractBackupTest {
             "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2",
             "--restoration-strategy-type=import",
             "--restoration-phase-type=download", /// DOWNLOAD
-            "--import-source-dir=" + target("downloaded"),
+            //"--import-source-dir=" + target("downloaded"),
+            "--import-source-dir="  + cassandraDir.toAbsolutePath().toString() + "/data/downloads",
             "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
         };
 
@@ -264,7 +270,7 @@ public abstract class AbstractBackupTest {
             "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2",
             "--restoration-strategy-type=import",
             "--restoration-phase-type=truncate", // TRUNCATE
-            "--import-source-dir=" + target("downloaded"),
+            "--import-source-dir="  + cassandraDir.toAbsolutePath().toString() + "/data/downloads",
             "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
         };
 
@@ -277,7 +283,7 @@ public abstract class AbstractBackupTest {
             "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2",
             "--restoration-strategy-type=import",
             "--restoration-phase-type=import", // IMPORT
-            "--import-source-dir=" + target("downloaded"),
+            "--import-source-dir="  + cassandraDir.toAbsolutePath().toString() + "/data/downloads",
             "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
         };
 
@@ -290,8 +296,117 @@ public abstract class AbstractBackupTest {
             "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2",
             "--restoration-strategy-type=import",
             "--restoration-phase-type=cleanup", // CLEANUP
+            "--import-source-dir="  + cassandraDir.toAbsolutePath().toString() + "/data/downloads",
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+        };
+
+        return new String[][]{
+            backupArgs,
+            backupArgsWithSnapshotName,
+            restoreArgsPhase1,
+            restoreArgsPhase2,
+            restoreArgsPhase3,
+            restoreArgsPhase4,
+        };
+    }
+
+    protected String[][] importArgumentsRenamedTable(final String cassandraVersion, final RestorationStrategyType strategyType, final boolean crossKeyspaceRename) {
+
+        final String snapshotName1 = "snapshot1";
+        final String snapshotName2 = "snapshot2";
+
+        String rename;
+
+        if (crossKeyspaceRename) {
+            rename = "--rename=test2.test2=test.test";
+        } else {
+            rename = "--rename=test2.test2=test2.test3";
+        }
+
+        // BACKUP
+
+        final String[] backupArgs = new String[]{
+            "backup",
+            "--jmx-service", "127.0.0.1:7199",
+            "--storage-location=" + getStorageLocation(),
+            "--snapshot-tag=" + snapshotName1,
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2", // keyspaces
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            "--create-missing-bucket"
+        };
+
+        final String[] backupArgsWithSnapshotName = new String[]{
+            "backup",
+            "--jmx-service", "127.0.0.1:7199",
+            "--storage-location=" + getStorageLocation(),
+            "--snapshot-tag=" + snapshotName2,
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--entities=" + systemKeyspace(cassandraVersion) + ",test,test2", // keyspaces
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            "--create-missing-bucket"
+        };
+
+        // RESTORE
+
+        final String[] restoreArgsPhase1 = new String[]{
+            "restore",
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--snapshot-tag=" + snapshotName2,
+            "--storage-location=" + getStorageLocation(),
+            "--update-cassandra-yaml=true",
+            "--entities=test2.test2",
+            "--restoration-strategy-type=" + strategyType.toValue().toLowerCase(),
+            "--restoration-phase-type=download", /// DOWNLOAD
             "--import-source-dir=" + target("downloaded"),
             "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            //// !!! Renaming for test2 to test3, test3 will be same as test2 and test2 will not be touched
+            rename
+        };
+
+        final String[] restoreArgsPhase2 = new String[]{
+            "restore",
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--snapshot-tag=" + snapshotName2,
+            "--storage-location=" + getStorageLocation(),
+            "--update-cassandra-yaml=true",
+            "--entities=test2.test2",
+            "--restoration-strategy-type=" + strategyType.toValue().toLowerCase(),
+            "--restoration-phase-type=truncate", // TRUNCATE
+            "--import-source-dir=" + target("downloaded"),
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            //// !!! Renaming for test2 to test3, test3 will be same as test2 and test2 will not be touched
+            rename
+        };
+
+        final String[] restoreArgsPhase3 = new String[]{
+            "restore",
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--snapshot-tag=" + snapshotName2,
+            "--storage-location=" + getStorageLocation(),
+            "--update-cassandra-yaml=true",
+            "--entities=test2.test2",
+            "--restoration-strategy-type=" + strategyType.toValue().toLowerCase(),
+            "--restoration-phase-type=import",
+            "--import-source-dir=" + target("downloaded"),
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            //// !!! Renaming for test2 to test3, test3 will be same as test2 and test2 will not be touched
+            rename
+        };
+
+        final String[] restoreArgsPhase4 = new String[]{
+            "restore",
+            "--data-directory=" + cassandraDir.toAbsolutePath().toString() + "/data",
+            "--snapshot-tag=" + snapshotName2,
+            "--storage-location=" + getStorageLocation(),
+            "--update-cassandra-yaml=true",
+            "--entities=test2.test2",
+            "--restoration-strategy-type=" + strategyType.toValue().toLowerCase(),
+            "--restoration-phase-type=cleanup", // CLEANUP
+            "--import-source-dir=" + target("downloaded"),
+            "--k8s-secret-name=" + SIDECAR_SECRET_NAME,
+            //// !!! Renaming for test2 to test3, test3 will be same as test2 and test2 will not be touched
+            rename
         };
 
         return new String[][]{
@@ -545,6 +660,75 @@ public abstract class AbstractBackupTest {
         }
     }
 
+    public void liveBackupRestoreTestRenamedEntities(final String[][] arguments,
+                                                     final String cassandraVersion,
+                                                     int rounds,
+                                                     boolean crossKeyspaceRestore) throws Exception {
+        Cassandra cassandra = getCassandra(cassandraDir, cassandraVersion, false);
+        cassandra.start();
+
+        waitForCql();
+
+        try (CqlSession session = CqlSession.builder().build()) {
+
+            createTable(session, KEYSPACE, TABLE);
+            createTable(session, KEYSPACE_2, TABLE_2);
+            createTable(session, KEYSPACE_2, TABLE_3);
+
+            insertAndCallBackupCLI(2, session, arguments[0]); // stefansnapshot-1
+            insertAndCallBackupCLI(2, session, arguments[1]); // stefansnapshot-2
+
+            // first round
+
+            for (int i = 1; i < rounds + 1; ++i) {
+
+                // each phase is executed twice here to check that phases are idempotent / repeatable
+
+                logger.info("Round " + i + " - Executing the first restoration phase - download {}", asList(arguments[2]));
+                Esop.mainWithoutExit(arguments[2]);
+
+                logger.info("Round " + i + " - Executing the first restoration phase - download {}", asList(arguments[2]));
+                Esop.mainWithoutExit(arguments[2]);
+
+                logger.info("Round " + i + " - Executing the second restoration phase - truncate {}", asList(arguments[3]));
+                Esop.mainWithoutExit(arguments[3]);
+
+                logger.info("Round " + i + " - Executing the second restoration phase - truncate {}", asList(arguments[3]));
+                Esop.mainWithoutExit(arguments[3]);
+
+                //
+                // this will import backup-ed table2 into table3
+                //
+                logger.info("Round " + i + " - Executing the third restoration phase - import {}", asList(arguments[4]));
+                Esop.mainWithoutExit(arguments[4]);
+
+                if (!cassandraVersion.startsWith("4")) {
+                    // second round would not pass for 4 because import deletes files in download
+                    logger.info("Round " + i + " - Executing the third restoration phase for the second time - import {}", asList(arguments[4]));
+                    Esop.mainWithoutExit(arguments[4]);
+                }
+
+                logger.info("Round " + i + " - Executing the fourth restoration phase - cleanup {}", asList(arguments[5]));
+                Esop.mainWithoutExit(arguments[5]);
+
+                logger.info("Round " + i + " - Executing the fourth restoration phase - cleanup {}", asList(arguments[5]));
+                Esop.mainWithoutExit(arguments[5]);
+
+                // we expect 4 records to be there as 2 were there before the first backup and the second 2 before the second backup
+                dumpTable(session, KEYSPACE, TABLE, 4);
+                dumpTable(session, KEYSPACE_2, TABLE_2, 4);
+                // here we expect that table3 is same as table2
+                if (!crossKeyspaceRestore) {
+                    dumpTable(session, KEYSPACE_2, TABLE_3, 4);
+                }
+            }
+        } finally {
+            cassandra.stop();
+            FileUtils.deleteDirectory(cassandraDir);
+            deleteDirectory(Paths.get(target("backup1")));
+        }
+    }
+
     public void liveBackupRestoreTest(final String[][] arguments, final String cassandraVersion, int rounds) throws Exception {
         Cassandra cassandra = getCassandra(cassandraDir, cassandraVersion, false);
         cassandra.start();
@@ -562,16 +746,32 @@ public abstract class AbstractBackupTest {
             // first round
 
             for (int i = 1; i < rounds + 1; ++i) {
+
+                // each phase is executed twice here to check that phases are idempotent / repeatable
+
                 logger.info("Round " + i + " - Executing the first restoration phase - download {}", asList(arguments[2]));
+                Esop.mainWithoutExit(arguments[2]);
+                logger.info("Round " + i + " - Executing the first restoration phase for the second time - download {}", asList(arguments[2]));
                 Esop.mainWithoutExit(arguments[2]);
 
                 logger.info("Round " + i + " - Executing the second restoration phase - truncate {}", asList(arguments[3]));
                 Esop.mainWithoutExit(arguments[3]);
+                logger.info("Round " + i + " - Executing the second restoration phase for the second time - truncate {}", asList(arguments[3]));
+                Esop.mainWithoutExit(arguments[3]);
 
                 logger.info("Round " + i + " - Executing the third restoration phase - import {}", asList(arguments[4]));
+
                 Esop.mainWithoutExit(arguments[4]);
 
+                if (!cassandraVersion.startsWith("4")) {
+                    // second round would not pass for 4 because import deletes files in download
+                    logger.info("Round " + i + " - Executing the third restoration phase for the second time - import {}", asList(arguments[4]));
+                    Esop.mainWithoutExit(arguments[4]);
+                }
+
                 logger.info("Round " + i + " - Executing the fourth restoration phase - cleanup {}", asList(arguments[5]));
+                Esop.mainWithoutExit(arguments[5]);
+                logger.info("Round " + i + " - Executing the fourth restoration phase for the second time - cleanup {}", asList(arguments[5]));
                 Esop.mainWithoutExit(arguments[5]);
 
                 // we expect 4 records to be there as 2 were there before the first backup and the second 2 before the second backup

@@ -6,7 +6,6 @@ import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -21,6 +20,7 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -32,8 +32,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.HashMultimap;
 import com.instaclustr.esop.impl.ManifestEntry.Type;
 import com.instaclustr.esop.impl.Snapshots.Snapshot.Keyspace.Table;
+import com.instaclustr.esop.impl.hash.HashSpec;
 
 public class Snapshots implements Cloneable {
+
+    public static HashSpec hashSpec;
 
     private final Map<String, Snapshot> snapshots = new HashMap<>();
 
@@ -114,6 +117,10 @@ public class Snapshots implements Cloneable {
             return keyspaces.entrySet().stream().anyMatch(entry -> entry.getKey().equals(keyspace));
         }
 
+        public boolean containsTable(final String keyspace, final String table) {
+            return Optional.ofNullable(keyspaces.get(keyspace)).flatMap(ks -> ks.getTable(table)).isPresent();
+        }
+
         public Optional<Keyspace> getKeyspace(final String keyspace) {
             return Optional.ofNullable(keyspaces.get(keyspace));
         }
@@ -126,9 +133,13 @@ public class Snapshots implements Cloneable {
             return Collections.unmodifiableMap(keyspaces);
         }
 
+        public void removeKeyspace(final String keyspace) {
+            keyspaces.remove(keyspace);
+        }
+
         public void removeKeyspaces(final List<String> keyspaces) {
             for (final String keyspace : keyspaces) {
-                this.keyspaces.remove(keyspace);
+                removeKeyspace(keyspace);
             }
         }
 
@@ -139,6 +150,10 @@ public class Snapshots implements Cloneable {
                     .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
                 ks.setTables(valuesToStay);
             });
+        }
+
+        public void removeTable(final String keyspace, final String table) {
+            removeTables(keyspace, Collections.singletonList(table));
         }
 
         public void add(final String name, final Keyspace keyspace) {
@@ -194,7 +209,7 @@ public class Snapshots implements Cloneable {
             return keyspaces.entrySet().stream().flatMap(keyspace -> keyspace.getValue().getManifestEntries().stream()).collect(toList());
         }
 
-        public static Snapshot parse(final String snapshotName, final List<Path> snapshotPaths) throws IOException {
+        public static Snapshot parse(final String snapshotName, final List<Path> snapshotPaths) throws Exception {
 
             final Snapshot snapshot = new Snapshot();
             snapshot.setName(snapshotName);
@@ -275,6 +290,47 @@ public class Snapshots implements Cloneable {
             return true;
         }
 
+        @FunctionalInterface
+        public interface ManifestEntryConsumer {
+
+            void consume(ManifestEntry entry, String keyspace, String table);
+        }
+
+        @FunctionalInterface
+        public interface ManifestEntryIdConsumer {
+
+            void consume(ManifestEntry entry, String keyspace, String table, String tableId);
+        }
+
+        public void forEachEntry(final ManifestEntryConsumer consumer) {
+            forEachKeyspace(keyspaceEntry -> {
+                final String keyspace = keyspaceEntry.getKey();
+
+                keyspaceEntry.getValue().forEachTable(tableEntry -> {
+                    final String tableName = tableEntry.getKey();
+
+                    tableEntry.getValue().forEachEntry(manifestEntry -> consumer.consume(manifestEntry, keyspace, tableName));
+                });
+            });
+        }
+
+        public void forEachEntry(final ManifestEntryIdConsumer consumer) {
+            forEachKeyspace(keyspaceEntry -> {
+                final String keyspace = keyspaceEntry.getKey();
+
+                keyspaceEntry.getValue().forEachTable(tableEntry -> {
+                    final String tableId = tableEntry.getValue().id;
+                    final String tableName = tableEntry.getKey();
+
+                    tableEntry.getValue().forEachEntry(manifestEntry -> consumer.consume(manifestEntry, keyspace, tableName, tableId));
+                });
+            });
+        }
+
+        public void forEachKeyspace(Consumer<Entry<String, Keyspace>> consumer) {
+            this.keyspaces.entrySet().forEach(consumer);
+        }
+
         public static class Keyspace implements Cloneable {
 
             private final Map<String, Table> tables = new HashMap<>();
@@ -289,7 +345,7 @@ public class Snapshots implements Cloneable {
                 }
             }
 
-            public static Keyspace parse(final String keyspace, List<Path> snapshotPaths) throws IOException {
+            public static Keyspace parse(final String keyspace, List<Path> snapshotPaths) throws Exception {
                 final Map<String, List<Path>> tableSnapshotPaths = snapshotPaths.stream().collect(groupingBy(p -> p.getParent().getParent().getFileName().toString()));
 
                 final Map<String, Table> tables = new HashMap<>();
@@ -300,6 +356,12 @@ public class Snapshots implements Cloneable {
                 }
 
                 return new Keyspace(tables);
+            }
+
+            public void forEachTable(Consumer<Entry<String, Table>> consumer) {
+                this.tables.forEach((name, table) -> {
+                    tables.entrySet().forEach(consumer);
+                });
             }
 
             public Map<String, Table> getTables() {
@@ -439,8 +501,7 @@ public class Snapshots implements Cloneable {
                     this.id = id;
                 }
 
-                public static Table parse(final String keyspace, final String table, final List<Path> value) throws IOException {
-
+                public static Table parse(final String keyspace, final String table, final List<Path> value) throws Exception {
                     final Table tb = new Table();
 
                     final Matcher matcher = TABLE_PATTERN.matcher(table);
@@ -455,19 +516,26 @@ public class Snapshots implements Cloneable {
                     final Path tablePath = Paths.get("data").resolve(Paths.get(keyspace, table));
 
                     for (final Path path : value) {
-                        tb.entries.addAll(SSTableUtils.ssTableManifest(path, tablePath).collect(toList()));
+                        tb.entries.addAll(SSTableUtils.ssTableManifest(path, tablePath, Snapshots.hashSpec).collect(toList()));
                     }
 
                     final Optional<Path> schemaPath = value.stream().map(p -> p.resolve("schema.cql")).filter(Files::exists).findFirst();
 
                     if (schemaPath.isPresent()) {
                         final Path schema = schemaPath.get();
-                        tb.schema = new ManifestEntry(tablePath.resolve("schema.cql"), schema, Type.CQL_SCHEMA);
+                        tb.schema = new ManifestEntry(tablePath.resolve("schema.cql"),
+                                                      schema,
+                                                      Type.CQL_SCHEMA,
+                                                      null);
                         tb.schemaContent = new String(Files.readAllBytes(schemaPath.get()));
                         tb.entries.add(tb.schema);
                     }
 
                     return tb;
+                }
+
+                public void forEachEntry(Consumer<ManifestEntry> entryConsumer) {
+                    getEntries().forEach(entryConsumer);
                 }
 
                 public List<ManifestEntry> getEntries() {
@@ -592,7 +660,11 @@ public class Snapshots implements Cloneable {
         }
     }
 
-    public static Snapshots parse(final Path cassandraDir) throws IOException {
+    public static Snapshots parse(final Path cassandraDir) throws Exception {
+
+        if (Snapshots.hashSpec == null) {
+            Snapshots.hashSpec = new HashSpec();
+        }
 
         final Snapshots snapshots = new Snapshots();
 

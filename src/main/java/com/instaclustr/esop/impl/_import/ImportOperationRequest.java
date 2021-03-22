@@ -1,6 +1,5 @@
 package com.instaclustr.esop.impl._import;
 
-import javax.validation.constraints.NotNull;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -101,6 +100,11 @@ public class ImportOperationRequest extends OperationRequest {
         required = false)  // not required as we will look into "entities" of restore request
     public String table;
 
+    @Option(names = "--table-path",
+        description = "path to table to import",
+        required = false)
+    public Path tablePath;
+
     @Option(names = {"--import-keep-level"},
         description = "upon import, keep the level on the new sstables")
     public boolean keepLevel = false;
@@ -129,7 +133,6 @@ public class ImportOperationRequest extends OperationRequest {
         description = "upon import, run an extended verify, verifying all values in the new sstables")
     public boolean extendedVerify = false;
 
-    @NotNull
     @JsonDeserialize(using = NioPathDeserializer.class)
     @JsonSerialize(using = NioPathSerializer.class)
     @Option(names = {"--import-source-dir"},
@@ -164,18 +167,19 @@ public class ImportOperationRequest extends OperationRequest {
     public ImportOperationRequest(@JsonProperty("type") final String type,
                                   @JsonProperty("keyspace") final String keyspace,
                                   @JsonProperty("table") final String table,
+                                  @JsonProperty("tablePath") final Path tablePath,
                                   @JsonProperty("keepLevel") final boolean keepLevel,
                                   @JsonProperty("noVerify") final boolean noVerify,
                                   @JsonProperty("noVerifyTokens") final boolean noVerifyTokens,
                                   @JsonProperty("noInvalidateCaches") final boolean noInvalidateCaches,
                                   @JsonProperty("quick") final boolean quick,
                                   @JsonProperty("extendedVerify") final boolean extendedVerify,
-                                  @NotNull
                                   @JsonProperty("sourceDir")
                                   @JsonDeserialize(using = NioPathDeserializer.class)
                                   @JsonSerialize(using = NioPathSerializer.class) final Path sourceDir) {
         this.keyspace = keyspace;
         this.table = table;
+        this.tablePath = tablePath;
         this.keepLevel = keepLevel;
         this.noVerify = noVerify;
         this.noVerifyTokens = noVerifyTokens;
@@ -198,13 +202,14 @@ public class ImportOperationRequest extends OperationRequest {
     }
 
     public ImportOperationRequest copy() {
-        return copy(this.keyspace, this.table);
+        return copy(this.keyspace, this.table, this.tablePath);
     }
 
-    public ImportOperationRequest copy(final String keyspace, final String table) {
+    public ImportOperationRequest copy(final String keyspace, final String table, final Path tablePath) {
         return new ImportOperationRequest(type,
                                           keyspace,
                                           table,
+                                          tablePath,
                                           this.keepLevel,
                                           this.noVerify,
                                           this.noVerifyTokens,
@@ -219,6 +224,7 @@ public class ImportOperationRequest extends OperationRequest {
         return MoreObjects.toStringHelper(this)
             .add("keyspace", keyspace)
             .add("table", table)
+            .add("tablePath", tablePath)
             .add("keepLevel", keepLevel)
             .add("noVerify", noVerify)
             .add("noVerifyTokens", noVerifyTokens)

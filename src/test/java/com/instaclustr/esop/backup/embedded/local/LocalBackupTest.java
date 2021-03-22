@@ -15,9 +15,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.github.nosan.embedded.cassandra.api.Cassandra;
@@ -47,6 +50,7 @@ import com.instaclustr.esop.impl.backup.coordination.ClearSnapshotOperation;
 import com.instaclustr.esop.impl.backup.coordination.ClearSnapshotOperation.ClearSnapshotOperationRequest;
 import com.instaclustr.esop.impl.backup.coordination.TakeSnapshotOperation;
 import com.instaclustr.esop.impl.backup.coordination.TakeSnapshotOperation.TakeSnapshotOperationRequest;
+import com.instaclustr.esop.impl.hash.HashSpec;
 import com.instaclustr.esop.impl.restore.RestoreOperationRequest;
 import com.instaclustr.esop.local.LocalFileBackuper;
 import com.instaclustr.esop.local.LocalFileModule;
@@ -101,6 +105,26 @@ public class LocalBackupTest extends AbstractBackupTest {
     @Test
     public void testInPlaceBackupRestore() throws Exception {
         inPlaceBackupRestoreTest(inPlaceArguments(CASSANDRA_VERSION));
+    }
+
+    @Test
+    public void testImportingBackupAndRestoreRenameEntitiesCrossKeyspaces() throws Exception {
+        liveBackupRestoreTestRenamedEntities(importArgumentsRenamedTable(CASSANDRA_4_VERSION, IMPORT, true), CASSANDRA_4_VERSION, 2, true);
+    }
+
+    @Test
+    public void testImportingHardlinksBackupAndRestoreRenameEntitiesCrossKeyspaces() throws Exception {
+        liveBackupRestoreTestRenamedEntities(importArgumentsRenamedTable(CASSANDRA_VERSION, HARDLINKS, true), CASSANDRA_VERSION, 2, true);
+    }
+
+    @Test
+    public void testImportingBackupAndRestoreRenameEntities() throws Exception {
+        liveBackupRestoreTestRenamedEntities(importArgumentsRenamedTable(CASSANDRA_4_VERSION, IMPORT, false), CASSANDRA_4_VERSION, 2, false);
+    }
+
+    @Test
+    public void testImportingHardlinksBackupAndRestoreRenameEntities() throws Exception {
+        liveBackupRestoreTestRenamedEntities(importArgumentsRenamedTable(CASSANDRA_VERSION, HARDLINKS, false), CASSANDRA_VERSION, 2, false);
     }
 
     @Test
@@ -198,14 +222,15 @@ public class LocalBackupTest extends AbstractBackupTest {
 
             final ListeningExecutorService finisher = new Executors.FixedTasksExecutorSupplier().get(10);
 
-            uploadTracker = new UploadTracker(finisher, operationsService) {
+            uploadTracker = new UploadTracker(finisher, operationsService, new HashSpec()) {
                 // override for testing purposes
                 @Override
                 public UploadUnit constructUnitToSubmit(final Backuper backuper,
                                                         final ManifestEntry manifestEntry,
                                                         final AtomicBoolean shouldCancel,
-                                                        final String snapshotTag) {
-                    return new TestingUploadUnit(wait, backuper, manifestEntry, shouldCancel, snapshotTag);
+                                                        final String snapshotTag,
+                                                        final HashSpec hashSpec) {
+                    return new TestingUploadUnit(wait, backuper, manifestEntry, shouldCancel, snapshotTag, hashSpec);
                 }
             };
 
@@ -228,8 +253,10 @@ public class LocalBackupTest extends AbstractBackupTest {
             assert snapshot.isPresent();
             assert snapshot2.isPresent();
 
-            final BackupOperation backupOperation = new BackupOperation(operationCoordinator, backupOperationRequest);
-            final BackupOperation backupOperation2 = new BackupOperation(operationCoordinator, backupOperationRequest2);
+            Set<String> providers = Stream.of("file").collect(Collectors.toSet());
+
+            final BackupOperation backupOperation = new BackupOperation(operationCoordinator, providers, backupOperationRequest);
+            final BackupOperation backupOperation2 = new BackupOperation(operationCoordinator, providers, backupOperationRequest2);
 
             final List<ManifestEntry> manifestEntries = Manifest.from(snapshot.get()).getManifestEntries();
             final List<ManifestEntry> manifestEntries2 = Manifest.from(snapshot2.get()).getManifestEntries();
@@ -329,7 +356,8 @@ public class LocalBackupTest extends AbstractBackupTest {
             false,
             null,
             false,
-            null // proxy settings
+            null, // proxy settings
+            null // retry
         );
     }
 
@@ -343,8 +371,9 @@ public class LocalBackupTest extends AbstractBackupTest {
                                  final Backuper backuper,
                                  final ManifestEntry manifestEntry,
                                  final AtomicBoolean shouldCancel,
-                                 final String snapshotTag) {
-            super(backuper, manifestEntry, shouldCancel, snapshotTag);
+                                 final String snapshotTag,
+                                 final HashSpec hashSpec) {
+            super(backuper, manifestEntry, shouldCancel, snapshotTag, hashSpec);
             this.wait = wait;
         }
 

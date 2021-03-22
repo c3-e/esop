@@ -1,10 +1,11 @@
 package com.instaclustr.esop.impl.restore;
 
-import javax.validation.constraints.Min;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -15,12 +16,14 @@ import com.fasterxml.jackson.databind.deser.std.UUIDDeserializer;
 import com.fasterxml.jackson.databind.ser.std.UUIDSerializer;
 import com.google.inject.assistedinject.Assisted;
 import com.google.inject.assistedinject.AssistedInject;
+import com.instaclustr.esop.guice.StorageProviders;
 import com.instaclustr.esop.impl.DatabaseEntities;
 import com.instaclustr.esop.impl.ProxySettings;
 import com.instaclustr.esop.impl.StorageLocation;
 import com.instaclustr.esop.impl._import.ImportOperationRequest;
 import com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType;
 import com.instaclustr.esop.impl.restore.RestorationStrategy.RestorationStrategyType;
+import com.instaclustr.esop.impl.retry.RetrySpec;
 import com.instaclustr.operations.Operation;
 import com.instaclustr.operations.OperationCoordinator;
 import com.instaclustr.operations.OperationFailureException;
@@ -28,9 +31,11 @@ import com.instaclustr.operations.OperationFailureException;
 public class RestoreOperation extends Operation<RestoreOperationRequest> implements Cloneable {
 
     private final OperationCoordinator<RestoreOperationRequest> coordinator;
+    private final Set<String> storageProviders;
 
     @AssistedInject
     public RestoreOperation(Optional<OperationCoordinator<RestoreOperationRequest>> coordinator,
+                            @StorageProviders Set<String> storageProviders,
                             @Assisted final RestoreOperationRequest request) {
         super(request);
 
@@ -39,11 +44,13 @@ public class RestoreOperation extends Operation<RestoreOperationRequest> impleme
         }
 
         this.coordinator = coordinator.get();
+        this.storageProviders = storageProviders;
     }
 
     public RestoreOperation(final RestoreOperationRequest request) {
         super(request);
         this.coordinator = null;
+        this.storageProviders = null;
         this.type = "restore";
     }
 
@@ -77,12 +84,15 @@ public class RestoreOperation extends Operation<RestoreOperationRequest> impleme
                              @JsonProperty("k8sNamespace") final String k8sNamespace,
                              @JsonProperty("k8sSecretName") final String k8sSecretName,
                              @JsonProperty("globalRequest") final boolean globalRequest,
-                             @JsonProperty("timeout") @Min(1) final Integer timeout,
+                             @JsonProperty("timeout") final Integer timeout,
                              @JsonProperty("resolveHostIdFromTopology") final Boolean resolveHostIdFromTopology,
                              @JsonProperty("insecure") final boolean insecure,
                              @JsonProperty("newCluster") final boolean newCluster,
                              @JsonProperty("skipBucketVerification") final boolean skipBucketVerification,
-                             @JsonProperty("proxySettings") final ProxySettings proxySettings) {
+                             @JsonProperty("proxySettings") final ProxySettings proxySettings,
+                             @JsonProperty("rename") final Map<String, String> rename,
+                             @JsonProperty("retry") final RetrySpec retry,
+                             @JsonProperty("singlePhase") final boolean singlePhase) {
         super(type, id, creationTime, state, errors, progress, startTime, new RestoreOperationRequest(type,
                                                                                                       storageLocation,
                                                                                                       concurrentConnections,
@@ -109,8 +119,12 @@ public class RestoreOperation extends Operation<RestoreOperationRequest> impleme
                                                                                                       insecure,
                                                                                                       newCluster,
                                                                                                       skipBucketVerification,
-                                                                                                      proxySettings));
+                                                                                                      proxySettings,
+                                                                                                      rename,
+                                                                                                      retry,
+                                                                                                      singlePhase));
         this.coordinator = null;
+        this.storageProviders = null;
     }
 
     @Override
@@ -121,6 +135,8 @@ public class RestoreOperation extends Operation<RestoreOperationRequest> impleme
     @Override
     protected void run0() throws Exception {
         assert coordinator != null;
+        assert storageProviders != null;
+        request.validate(storageProviders);
         coordinator.coordinate(this);
     }
 }

@@ -1,5 +1,10 @@
 package com.instaclustr.esop.impl.restore.strategy;
 
+import static com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType.CLEANUP;
+import static com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType.DOWNLOAD;
+import static com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType.IMPORT;
+import static com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType.INIT;
+import static com.instaclustr.esop.impl.restore.RestorationPhase.RestorationPhaseType.TRUNCATE;
 import static java.lang.String.format;
 
 import java.util.Map;
@@ -9,6 +14,7 @@ import com.google.inject.Inject;
 import com.google.inject.Provider;
 import com.instaclustr.cassandra.CassandraVersion;
 import com.instaclustr.esop.guice.BucketServiceFactory;
+import com.instaclustr.esop.impl.hash.HashService;
 import com.instaclustr.esop.impl.restore.DownloadTracker;
 import com.instaclustr.esop.impl.restore.RestorationPhase;
 import com.instaclustr.esop.impl.restore.RestorationPhase.CleaningPhase;
@@ -42,18 +48,9 @@ public class ImportingRestorationStrategy extends AbstractRestorationStrategy {
                                         final Provider<CassandraVersion> cassandraVersion,
                                         final ObjectMapper objectMapper,
                                         final DownloadTracker downloadTracker,
-                                        final Map<String, BucketServiceFactory> bucketServiceFactoryMap) {
-        super(cassandraJMXService, cassandraVersion, objectMapper, downloadTracker, bucketServiceFactoryMap);
-    }
-
-    @Override
-    public void isEligibleToRun() {
-        final CassandraVersion cassandraVersion = this.cassandraVersion.get();
-
-        if (!CassandraVersion.isFour(this.cassandraVersion.get())) {
-            throw new IllegalStateException("This type of restoration strategy can be used only against Cassandra 4. " +
-                                                "You are running this restoration against " + cassandraVersion.toString());
-        }
+                                        final Map<String, BucketServiceFactory> bucketServiceFactoryMap,
+                                        final HashService hashService) {
+        super(cassandraJMXService, cassandraVersion, objectMapper, downloadTracker, bucketServiceFactoryMap, hashService);
     }
 
     @Override
@@ -64,19 +61,29 @@ public class ImportingRestorationStrategy extends AbstractRestorationStrategy {
     @Override
     public RestorationPhase resolveRestorationPhase(final Operation<RestoreOperationRequest> operation, final Restorer restorer) {
 
-        final RestorationContext ctxt = initialiseRestorationContext(operation, restorer, objectMapper, cassandraVersion, downloadTracker, bucketServiceFactoryMap);
+        final RestorationContext ctxt = initialiseRestorationContext(operation,
+                                                                     restorer,
+                                                                     objectMapper,
+                                                                     cassandraVersion,
+                                                                     downloadTracker,
+                                                                     bucketServiceFactoryMap);
+
         final RestorationPhaseType phaseType = ctxt.operation.request.restorationPhase;
 
-        if (phaseType == RestorationPhaseType.INIT) {
-            return new InitPhase(ctxt);
-        } else if (phaseType == RestorationPhaseType.DOWNLOAD) {
-            return new DownloadingPhase(ctxt);
-        } else if (phaseType == RestorationPhaseType.TRUNCATE) {
-            return new TruncatingPhase(ctxt);
-        } else if (phaseType == RestorationPhaseType.IMPORT) {
-            return new ImportingPhase(ctxt);
-        } else if (phaseType == RestorationPhaseType.CLEANUP) {
-            return new CleaningPhase(ctxt);
+        try {
+            if (phaseType == INIT) {
+                return new InitPhase(ctxt);
+            } else if (phaseType == DOWNLOAD) {
+                return new DownloadingPhase(ctxt);
+            } else if (phaseType == TRUNCATE) {
+                return new TruncatingPhase(ctxt);
+            } else if (phaseType == IMPORT) {
+                return new ImportingPhase(ctxt);
+            } else if (phaseType == CLEANUP) {
+                return new CleaningPhase(ctxt);
+            }
+        } catch (final Exception ex) {
+            throw new IllegalStateException(format("Unable to initialise phase %s", phaseType.toValue()), ex);
         }
 
         throw new IllegalStateException(format("Unable to resolve phase for phase type %s for %s.",

@@ -1,5 +1,6 @@
 package com.instaclustr.esop.impl;
 
+import static com.instaclustr.esop.impl.ManifestEntry.Type.MANIFEST_FILE;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.toList;
 
@@ -95,20 +96,6 @@ public class Manifest implements Cloneable {
         return this.tokens.size() == tokens.size() && this.tokens.containsAll(tokens);
     }
 
-    public void enrichManifestEntries(final Path localPathRoot) {
-
-        snapshot.getKeyspaces().forEach((ksName, keyspace) -> {
-            keyspace.getTables().forEach((tableName, table) -> {
-                table.getEntries().forEach(entry -> {
-                    final Path objectKey = entry.objectKey;
-                    final int hashPathPart = SSTableUtils.isSecondaryIndexManifest(objectKey) ? 4 : 3;
-                    entry.localFile = localPathRoot.resolve(objectKey.subpath(0, hashPathPart)).resolve(objectKey.getFileName());
-                    entry.keyspaceTable = new KeyspaceTable(ksName, tableName);
-                });
-            });
-        });
-    }
-
     @JsonIgnore
     public DatabaseEntities getDatabaseEntities(final boolean includeSystemKeyspaces) {
         final Multimap<String, String> keyspaceAndTables = HashMultimap.create();
@@ -191,8 +178,11 @@ public class Manifest implements Cloneable {
         return Objects.hashCode(snapshot, manifest, tokens, schemaVersion);
     }
 
-    public static ManifestEntry getManifestAsManifestEntry(final Path localManifestPath) throws Exception {
-        return new ManifestEntry(Paths.get("manifests").resolve(localManifestPath.getFileName()), localManifestPath, ManifestEntry.Type.MANIFEST_FILE);
+    public static ManifestEntry getManifestAsManifestEntry(final Path localManifestPath) {
+        return new ManifestEntry(Paths.get("manifests").resolve(localManifestPath.getFileName()),
+                                 localManifestPath,
+                                 MANIFEST_FILE,
+                                 null);
     }
 
     public static void write(final Manifest manifest, final Path localManifestPath, final ObjectMapper objectMapper) throws Exception {
@@ -238,10 +228,10 @@ public class Manifest implements Cloneable {
         long latestTimestamp = 0;
 
         for (final String manifestPath : manifestsPaths) {
-            try  {
+            try {
 
                 final String timestampWithFileSuffix = manifestPath.substring(manifestPath.lastIndexOf("-") + 1);
-                final String timestamp =  timestampWithFileSuffix.substring(0, timestampWithFileSuffix.lastIndexOf("."));
+                final String timestamp = timestampWithFileSuffix.substring(0, timestampWithFileSuffix.lastIndexOf("."));
 
                 final long currentTimestamp = Long.parseLong(timestamp);
                 if (currentTimestamp > latestTimestamp) {
@@ -271,16 +261,12 @@ public class Manifest implements Cloneable {
         return getManifestFiles(entities, restoreSystemKeyspace, newCluster, true);
     }
 
-    private boolean filterSystemKeyspace(String ks, boolean restoreSystemKeyspace, boolean newCluster) {
-        if (KeyspaceTable.isSystemKeyspace(ks)) {
-            if (KeyspaceTable.isBootstrappingKeyspace(ks)) {
-                return !newCluster && !restoreSystemKeyspace;
-            } else {
-                return !restoreSystemKeyspace;
-            }
-        }
-
-        return false;
+    @JsonIgnore
+    public List<ManifestEntry> getManifestFiles(final DatabaseEntities entities,
+                                                final boolean restoreSystemKeyspace,
+                                                final boolean newCluster,
+                                                final boolean withSchemas) {
+        return getManifestFiles(entities, restoreSystemKeyspace, newCluster, withSchemas, null);
     }
 
     @JsonIgnore
@@ -305,7 +291,7 @@ public class Manifest implements Cloneable {
                 final Optional<Keyspace> keyspace = snapshot.getKeyspace(entry.getKey());
 
                 if (!keyspace.isPresent()) {
-                    continue;
+                    throw new IllegalStateException(format("Keyspace %s is not in manifest!", entry.getKey()));
                 }
 
                 if (filterSystemKeyspace(entry.getKey(), restoreSystemKeyspace, newCluster)) {
@@ -314,6 +300,10 @@ public class Manifest implements Cloneable {
 
                 final Optional<Table> table = keyspace.get().getTable(entry.getValue());
 
+                if (!table.isPresent()) {
+                    throw new IllegalStateException(format("Table %s.%s is not in manifest!", entry.getKey(), entry.getValue()));
+                }
+
                 table.ifPresent(value -> manifestEntries.addAll(value.getEntries()));
             }
         } else {
@@ -321,7 +311,7 @@ public class Manifest implements Cloneable {
                 final Optional<Keyspace> keyspace = snapshot.getKeyspace(ks);
 
                 if (!keyspace.isPresent()) {
-                    continue;
+                    throw new IllegalStateException(format("Keyspace %s is not in manifest!", ks));
                 }
 
                 if (filterSystemKeyspace(ks, restoreSystemKeyspace, newCluster)) {
@@ -357,11 +347,30 @@ public class Manifest implements Cloneable {
         return manifestEntryStream.collect(toList());
     }
 
-    @JsonIgnore
-    public List<ManifestEntry> getManifestFiles(final DatabaseEntities entities,
-                                                final boolean restoreSystemKeyspace,
-                                                final boolean newCluster,
-                                                final boolean withSchemas) {
-        return getManifestFiles(entities, restoreSystemKeyspace, newCluster, withSchemas, null);
+    private boolean filterSystemKeyspace(String ks, boolean restoreSystemKeyspace, boolean newCluster) {
+        if (KeyspaceTable.isSystemKeyspace(ks)) {
+            if (KeyspaceTable.isBootstrappingKeyspace(ks)) {
+                return !newCluster && !restoreSystemKeyspace;
+            } else {
+                return !restoreSystemKeyspace;
+            }
+        }
+
+        return false;
+    }
+
+    // for in place strategy
+    public void enrichManifestEntries(final Path localPathRoot) {
+
+        snapshot.getKeyspaces().forEach((ksName, keyspace) -> {
+            keyspace.getTables().forEach((tableName, table) -> {
+                table.getEntries().forEach(entry -> {
+                    final Path objectKey = entry.objectKey;
+                    final int hashPathPart = SSTableUtils.isSecondaryIndexManifest(objectKey) ? 4 : 3;
+                    entry.localFile = localPathRoot.resolve(objectKey.subpath(0, hashPathPart)).resolve(objectKey.getFileName());
+                    entry.keyspaceTable = new KeyspaceTable(ksName, tableName);
+                });
+            });
+        });
     }
 }

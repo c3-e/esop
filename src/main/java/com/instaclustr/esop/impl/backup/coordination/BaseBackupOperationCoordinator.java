@@ -5,10 +5,12 @@ import static com.instaclustr.esop.impl.Manifest.getManifestAsManifestEntry;
 import static java.lang.String.format;
 
 import javax.inject.Provider;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.instaclustr.cassandra.CassandraVersion;
@@ -16,7 +18,7 @@ import com.instaclustr.esop.guice.BackuperFactory;
 import com.instaclustr.esop.guice.BucketServiceFactory;
 import com.instaclustr.esop.impl.AbstractTracker.Session;
 import com.instaclustr.esop.impl.BucketService;
-import com.instaclustr.esop.impl.KeyspaceTable;
+import com.instaclustr.esop.impl.CassandraData;
 import com.instaclustr.esop.impl.Manifest;
 import com.instaclustr.esop.impl.ManifestEntry;
 import com.instaclustr.esop.impl.Snapshots;
@@ -27,6 +29,7 @@ import com.instaclustr.esop.impl.backup.UploadTracker;
 import com.instaclustr.esop.impl.backup.UploadTracker.UploadUnit;
 import com.instaclustr.esop.impl.backup.coordination.ClearSnapshotOperation.ClearSnapshotOperationRequest;
 import com.instaclustr.esop.impl.backup.coordination.TakeSnapshotOperation.TakeSnapshotOperationRequest;
+import com.instaclustr.esop.impl.hash.HashSpec;
 import com.instaclustr.esop.impl.interaction.CassandraSchemaVersion;
 import com.instaclustr.esop.impl.interaction.CassandraTokens;
 import com.instaclustr.esop.topology.CassandraClusterTopology;
@@ -48,19 +51,22 @@ public class BaseBackupOperationCoordinator extends OperationCoordinator<BackupO
     protected final ObjectMapper objectMapper;
     protected final UploadTracker uploadTracker;
     protected final Provider<CassandraVersion> cassandraVersionProvider;
+    protected final HashSpec hashSpec;
 
     public BaseBackupOperationCoordinator(final CassandraJMXService cassandraJMXService,
                                           final Provider<CassandraVersion> cassandraVersionProvider,
                                           final Map<String, BackuperFactory> backuperFactoryMap,
                                           final Map<String, BucketServiceFactory> bucketServiceFactoryMap,
                                           final ObjectMapper objectMapper,
-                                          final UploadTracker uploadTracker) {
+                                          final UploadTracker uploadTracker,
+                                          final HashSpec hashSpec) {
         this.cassandraJMXService = cassandraJMXService;
         this.backuperFactoryMap = backuperFactoryMap;
         this.bucketServiceFactoryMap = bucketServiceFactoryMap;
         this.objectMapper = objectMapper;
         this.uploadTracker = uploadTracker;
         this.cassandraVersionProvider = cassandraVersionProvider;
+        this.hashSpec = hashSpec;
     }
 
     protected String resolveSnapshotTag(final BackupOperationRequest request, final long timestamp) {
@@ -86,7 +92,8 @@ public class BaseBackupOperationCoordinator extends OperationCoordinator<BackupO
                 }
             }
 
-            KeyspaceTable.checkEntitiesToProcess(request.cassandraDirectory.resolve("data"), request.entities);
+            final CassandraData cassandraData = CassandraData.parse(request.cassandraDirectory.resolve("data"));
+            cassandraData.setDatabaseEntitiesFromRequest(request.entities);
 
             final List<String> tokens = new CassandraTokens(cassandraJMXService).act();
 
@@ -103,6 +110,7 @@ public class BaseBackupOperationCoordinator extends OperationCoordinator<BackupO
                                       new TakeSnapshotOperationRequest(request.entities, request.snapshotTag),
                                       cassandraVersionProvider).run0();
 
+            Snapshots.hashSpec = hashSpec;
             final Snapshots snapshots = Snapshots.parse(request.cassandraDirectory.resolve("data"));
 
             final Optional<Snapshot> snapshot = snapshots.get(request.snapshotTag);
@@ -132,6 +140,14 @@ public class BaseBackupOperationCoordinator extends OperationCoordinator<BackupO
 
                     uploadSession.waitUntilConsideredFinished();
                     uploadTracker.cancelIfNecessary(uploadSession);
+
+                    final List<UploadUnit> failedUnits = uploadSession.getFailedUnits();
+
+                    if (!failedUnits.isEmpty()) {
+                        final String message = failedUnits.stream().map(unit -> unit.getManifestEntry().objectKey.toString()).collect(Collectors.joining(","));
+                        logger.error(message);
+                        throw new IOException(format("Unable to upload some files successfully: %s", message));
+                    }
                 } finally {
                     uploadTracker.removeSession(uploadSession);
                     uploadSession = null;
