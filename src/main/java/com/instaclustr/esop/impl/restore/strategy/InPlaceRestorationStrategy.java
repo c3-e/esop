@@ -3,7 +3,6 @@ package com.instaclustr.esop.impl.restore.strategy;
 import static com.instaclustr.io.FileUtils.cleanDirectory;
 import static java.lang.String.format;
 
-import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -33,7 +32,6 @@ import com.instaclustr.esop.impl.restore.Restorer;
 import com.instaclustr.esop.topology.CassandraClusterTopology.ClusterTopology;
 import com.instaclustr.esop.topology.CassandraClusterTopology.ClusterTopology.NodeTopology;
 import com.instaclustr.io.FileUtils;
-import com.instaclustr.io.GlobalLock;
 import com.instaclustr.kubernetes.KubernetesHelper;
 import com.instaclustr.operations.Operation;
 import com.instaclustr.operations.Operation.Error;
@@ -70,8 +68,6 @@ public class InPlaceRestorationStrategy implements RestorationStrategy {
 
         final RestoreOperationRequest request = operation.request;
 
-        final FileLock fileLock = new GlobalLock(request.lockFile).waitForLock();
-
         try {
             if (operation.request.restorationStrategyType != RestorationStrategyType.IN_PLACE) {
                 throw new IllegalStateException(format("restorationStrategyType has to be of type '%s' in case you want to use %s, it is of type '%s'",
@@ -94,7 +90,7 @@ public class InPlaceRestorationStrategy implements RestorationStrategy {
                 final NodeTopology nodeTopology = getNodeTopology(restorer, request);
                 // here, nodeTopology.nodeId is uuid, not hostname
                 operation.request.storageLocation = StorageLocation.updateNodeId(operation.request.storageLocation, nodeTopology.nodeId);
-                restorer.updateStorageLocation(operation.request.storageLocation);
+                restorer.setStorageLocation(operation.request.storageLocation);
                 logger.info(format("Updated storage location to %s", operation.request.storageLocation));
             }
 
@@ -230,8 +226,6 @@ public class InPlaceRestorationStrategy implements RestorationStrategy {
             }
         } catch (final Exception ex) {
             operation.addError(Error.from(ex));
-        } finally {
-            fileLock.release();
         }
     }
 
@@ -242,7 +236,7 @@ public class InPlaceRestorationStrategy implements RestorationStrategy {
 
     private NodeTopology getNodeTopology(final Restorer restorer, final RestoreOperationRequest request) {
         try {
-            final String topologyFile = format("topology/%s-%s", request.storageLocation.clusterId, request.snapshotTag);
+            final String topologyFile = format("topology/%s", request.snapshotTag);
             final String topology = restorer.downloadFileToString(Paths.get(topologyFile), fileName -> fileName.contains(topologyFile));
             final ClusterTopology clusterTopology = objectMapper.readValue(topology, ClusterTopology.class);
             // nodeId here is propagated by Cassandra operator and it is "hostname"

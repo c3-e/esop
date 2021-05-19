@@ -4,7 +4,6 @@ import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 
 import com.google.inject.assistedinject.Assisted;
 import com.google.inject.assistedinject.AssistedInject;
@@ -30,6 +29,11 @@ public class LocalFileBackuper extends Backuper {
     }
 
     @Override
+    public Path resolveRoot() {
+        return request.storageLocation.fileBackupDirectory.resolve(request.storageLocation.bucket);
+    }
+
+    @Override
     public RemoteObjectReference objectKeyToRemoteReference(final Path objectKey) throws Exception {
         return new LocalFileObjectReference(objectKey, objectKey.toFile().getCanonicalFile().toString());
     }
@@ -52,12 +56,14 @@ public class LocalFileBackuper extends Backuper {
     }
 
     @Override
-    public void uploadFile(final long size,
+    public synchronized void uploadFile(final long size,
                            final InputStream localFileStream,
                            final RemoteObjectReference objectReference) throws Exception {
         Path remotePath = resolveFullRemoteObjectPath(objectReference);
         Files.createDirectories(remotePath.getParent());
-        Files.copy(localFileStream, remotePath, StandardCopyOption.REPLACE_EXISTING);
+        if (!Files.exists(remotePath)) {
+            Files.copy(localFileStream, remotePath);
+        }
     }
 
     @Override
